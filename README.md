@@ -8,6 +8,12 @@ Unofficial Home Assistant integration for Panasonic Doorphone Connect. After the
 
 **Not affiliated with Panasonic. Provided as-is. Expect breakage, cloud-side refusal, and firmware drift.**
 
+## 現状 / Status
+
+しばらく触っていません。これは 2026 年 5 月時点で自宅の VL-MWD505 に載っていたスナップショットで、HACS 向けに磨いたものでも、今すぐ clone して動く製品でもありません。パッケージ化・認証・インストールまわりの硬化は **シルバーウィーク（2026 年 9 月下旬）** までほぼやりません。それまで issue や PR は溜まります。
+
+I have not touched this in a while. This is a snapshot of what was running against a VL-MWD505 in May 2026 — not a HACS-ready install, not something I will support this week. Packaging, auth, and install hardening probably wait until **Silver Week (late September 2026)**. Issues and PRs will sit until then.
+
 ## これは何か / What this is
 
 呼び出しボタンを押しても、宅内 LAN に「誰かが来た」という通知は出ません。親機はパナソニックの VIANA クラウド（東京 AWS）へ HTTPS で知らせ、音声と映像は宅内 RTP のまま流れます。A 接点をリレーで拾う必要はありません。ネットワークに載っているなら、ネットワークで完結できます。
