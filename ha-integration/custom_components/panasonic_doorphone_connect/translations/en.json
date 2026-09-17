@@ -1,0 +1,34 @@
+{
+  "config": {
+    "step": {
+      "credentials": {
+        "title": "Found your Panasonic doorphone",
+        "description": "Detected base unit `{base_model}` at `{base_ip}` (MAC `{base_mac}`).\n\nEnter the **base login password** you set on the base unit's own menu (Menu → Settings → Network → Base login password).\n\nYou'll press the pair button on the base on the next screen.",
+        "data": {
+          "base_login_password": "Base login password",
+          "display_name": "Display name"
+        },
+        "data_description": {
+          "base_login_password": "The password you set on the base unit itself, NOT your VIANA / cloud password.",
+          "display_name": "How this doorphone shows up in HA. Becomes the prefix on entity names."
+        }
+      },
+      "pair": {
+        "title": "Press the pair button on your doorphone",
+        "description": "Walk to your Panasonic base unit and **press and hold the pair confirmation button** until it enters pair mode (you'll usually hear a tone or see a flashing light).\n\nWhen you've pressed it, click Submit below — Home Assistant will negotiate with the base for up to a minute."
+      }
+    },
+    "error": {
+      "pair_failed": "Pairing failed unexpectedly. Check the daemon log: `docker logs viana-ha` (or `journalctl -u viana-ha`).",
+      "pair_timeout": "Didn't see the pair button get pressed in time. Try again — give yourself enough time to walk to the base.",
+      "wrong_password": "The base login password was rejected. Double-check the value you set on the base's own menu.",
+      "no_base_on_lan": "No Panasonic base answered on this network. Make sure the base is powered, on the same LAN, and in pair mode."
+    },
+    "abort": {
+      "already_configured": "This doorphone is already set up.",
+      "daemon_missing": "The viana-ha daemon discovery file isn't in place yet. Wait for the deploy workflow to finish, then try again.",
+      "daemon_unreachable": "Couldn't reach the viana-ha daemon. Check that the `viana-ha` container/service is running.",
+      "no_base_on_lan": "No Panasonic base answered on this LAN. Make sure your doorphone base is powered and reachable from Home Assistant."
+    }
+  }
+}

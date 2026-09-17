@@ -1,0 +1,11 @@
+[package]
+name = "viana-media"
+description = "RTP, XOR unwrap, PCMA, H.264, and challenge-response for Doorphone Connect media."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+viana-protocol = { path = "../viana-protocol" }
+thiserror = { workspace = true }
+tracing = { workspace = true }

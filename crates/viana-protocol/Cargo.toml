@@ -1,0 +1,32 @@
+[package]
+name = "viana-protocol"
+description = "Panasonic Doorphone Connect VIANA identity, signaling, SIP, and SDP."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aes = { workspace = true }
+cbc = { workspace = true }
+cipher = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+md-5 = "0.10"
+hex = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+quick-xml = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+tracing-subscriber = { workspace = true }
+
+[[example]]
+name = "mint_live"
+path = "examples/mint_live.rs"

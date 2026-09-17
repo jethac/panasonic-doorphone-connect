@@ -1,0 +1,34 @@
+{
+  "config": {
+    "step": {
+      "credentials": {
+        "title": "パナソニックのドアホンを見つけました",
+        "description": "親機 `{base_model}` を `{base_ip}`（MAC `{base_mac}`）で検出しました。\n\n親機本体のメニューで設定した **親機ログインパスワード** を入力してください（メニュー → 設定 → ネットワーク → 親機ログインパスワード）。\n\n次の画面で親機のペアボタンを押します。",
+        "data": {
+          "base_login_password": "親機ログインパスワード",
+          "display_name": "表示名"
+        },
+        "data_description": {
+          "base_login_password": "親機本体で設定したパスワードです。VIANA / クラウドのパスワードではありません。",
+          "display_name": "Home Assistant 上の名前。エンティティ ID の接頭辞になります。"
+        }
+      },
+      "pair": {
+        "title": "親機のペアボタンを押してください",
+        "description": "パナソニック親機のところへ行き、**ペア確認ボタンを長押し**してペアモードに入れてください（音が鳴るか、ランプが点滅することが多いです）。\n\n押したら下の送信をタップしてください。Home Assistant は最大約1分、親機と交渉します。"
+      }
+    },
+    "error": {
+      "pair_failed": "ペアリングに失敗しました。デーモンのログを確認してください: `journalctl -u viana-ha`。",
+      "pair_timeout": "制限時間内にペアボタンが押されませんでした。親機まで歩ける時間を取って、もう一度試してください。",
+      "wrong_password": "親機ログインパスワードが拒否されました。親機本体のメニューの値を確認してください。",
+      "no_base_on_lan": "このネットワークでパナソニック親機が応答しませんでした。電源、同一 LAN、ペアモードを確認してください。"
+    },
+    "abort": {
+      "already_configured": "このドアホンはすでに設定済みです。",
+      "daemon_missing": "viana-ha デーモンの発見ファイルがまだありません。デーモンを起動し、`<config>/.viana-ha-discovery.json` を置いてからやり直してください。",
+      "daemon_unreachable": "viana-ha デーモンに届きません。`viana-ha` サービスが動いているか確認してください。",
+      "no_base_on_lan": "この LAN でパナソニック親機が応答しませんでした。電源と到達性を確認してください。"
+    }
+  }
+}

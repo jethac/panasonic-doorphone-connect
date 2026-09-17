@@ -1,0 +1,35 @@
+[package]
+name = "viana-ha"
+description = "Headless bridge daemon: VIANA client + local HTTP API for the Home Assistant integration."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "viana-ha"
+path = "src/main.rs"
+
+[dependencies]
+viana-protocol = { path = "../viana-protocol" }
+viana-media = { path = "../viana-media" }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true, features = ["sync", "process"] }
+tokio-tungstenite = { workspace = true }
+native-tls = { workspace = true }
+reqwest = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+toml = { workspace = true }
+rand = { workspace = true }
+async-stream = { workspace = true }
+uuid = { version = "1", features = ["v4", "serde"] }
+bytes = "1"

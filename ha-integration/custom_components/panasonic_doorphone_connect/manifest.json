@@ -1,0 +1,12 @@
+{
+  "domain": "panasonic_doorphone_connect",
+  "name": "Doorphone Connect (Unofficial)",
+  "version": "0.2.0",
+  "config_flow": true,
+  "documentation": "https://github.com/jethac/panasonic-doorphone-connect",
+  "issue_tracker": "https://github.com/jethac/panasonic-doorphone-connect/issues",
+  "codeowners": ["@jethac"],
+  "iot_class": "local_push",
+  "integration_type": "device",
+  "requirements": ["aiohttp>=3.9", "aiohttp-sse-client>=0.2.1"]
+}

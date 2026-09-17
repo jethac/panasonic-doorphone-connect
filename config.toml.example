@@ -1,0 +1,20 @@
+# Copy to the path passed as --config-path (default /opt/viana-ha/config.toml).
+# The daemon fills [base] after a successful pair. Do not commit a live copy.
+
+[identity]
+kiki_path = "/opt/viana-ha/identity/kiki.dat"
+ca_cert_path = "/opt/viana-ha/identity/ca.pem"
+# unique_id = "00000002199023255552"
+
+[server]
+listen = "127.0.0.1:7878"
+# auth_token is generated on first boot if omitted.
+
+[heartbeat]
+interval_secs = 10
+
+# Optional: if CGI 108 returns an empty body, set the 16-digit base viana_id
+# here so kick targeting still works.
+# [base]
+# viana_id = "0000000000000000"
+# lan_ip = "192.0.2.1"

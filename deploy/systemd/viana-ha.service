@@ -1,0 +1,20 @@
+[Unit]
+Description=Unofficial Panasonic Doorphone Connect bridge daemon
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/viana-ha/bin/viana-ha
+
+[Service]
+Type=simple
+# Change User/Group to the account that owns /opt/viana-ha.
+User=viana
+Group=viana
+WorkingDirectory=/opt/viana-ha
+ExecStart=/opt/viana-ha/bin/viana-ha
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

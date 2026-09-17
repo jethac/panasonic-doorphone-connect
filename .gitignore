@@ -1,0 +1,17 @@
+/target
+**/target
+**/*.rs.bk
+**/__pycache__/
+*.pyc
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Runtime identity and config (never commit)
+kiki.dat
+*.disp_id
+*.synthetic_mac
+config.toml
+identity/
+monitor_*/
