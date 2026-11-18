@@ -148,6 +148,20 @@ sudo systemctl enable --now viana-ha
 
 Automation snippets live in [`ha-integration/custom_components/panasonic_doorphone_connect/AUTOMATIONS.md`](ha-integration/custom_components/panasonic_doorphone_connect/AUTOMATIONS.md).
 
+## ミニト　不具合 / Minting is Presently Broken
+現時点、本プログラムのKikiIdは作成できない状態ので、他の手段でKikiIdを作成する必要です。
+(1) ルートになっている機器から、アンドロイドの携帯アプリを起動。
+(2) そこからkiki.datおよびdisp_idを奪う。kiki.datは`/data/data/com.panasonic.psn.android.doorphoneconnect`においている。disp_idはログの「W VIANA   : jni/interface/p2papl_kikiId.c:246 (P2PAPL_GetKikiId) dispID=1111222233334444」のようなラインから取れる。
+(3) viana-haのidentityのところにkiki.datおよびkiki.disp_idとして保存する。
+
+
+Right now the minting implementation for KikiId is blocked by Panasonic at the server.
+To get around this, a different method is needed to produce a KikiId.
+(1) Start the app of a rooted android device.
+(2) Take kiki.dat and the disp_id from there. Kiki.dat will be in the `/data/data/com.panasonic.psn.android.doorphoneconnect` directory and disp_id can be acquired from a line like 「W VIANA   : jni/interface/p2papl_kikiId.c:246 (P2PAPL_GetKikiId) dispID=1111222233334444」`
+(3) Place these into the viana-ha `identity` directory as kiki.dat and kiki.disp_id respectively.
+
+
 ## セキュリティ / Security
 
 メディア経路の XOR は暗号ではありません。鍵は呼び出しごとに変わりますが、鍵を知っていれば RTP をその場で解けます。このブリッジは自分のセッション鍵だけを使います。他人のドアホンを遠隔から乗っ取る手順ではありません。
