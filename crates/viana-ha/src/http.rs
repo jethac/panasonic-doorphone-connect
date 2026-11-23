@@ -300,7 +300,7 @@ async fn post_pair(
     // Persist into config.
     let base_cfg = BaseConfig {
         viana_id: result.base_viana_id.clone(),
-        lan_ip: Some(result.base_lan_ip.to_string()),
+        lan_ip: Some(std::net::IpAddr::V4(result.base_lan_ip).to_string()),
         mac: Some(result.base_mac.clone()),
         model: Some(result.base_model.clone()),
         display_name: req.display_name.clone(),
@@ -512,6 +512,7 @@ impl Drop for ConsumerGuard {
 /// so the camera/audio actually has bytes to serve. Per
 /// INTERCOM-DESIGN.md §C "manual camera open also fires monitor".
 async fn increment_consumer_and_maybe_start(state: &ApiState) -> ConsumerGuard {
+    let cfg = state.config.lock().await;
     let should_start = {
         let mut s = state.media_hub.state.lock().await;
         let was_idle = s.stream_consumers == 0 && s.outbound.is_none();
@@ -520,7 +521,7 @@ async fn increment_consumer_and_maybe_start(state: &ApiState) -> ConsumerGuard {
     };
     if should_start {
         let cmd = crate::DaemonCommand::StartMonitor {
-            media_dir: "/tmp/viana-stream".to_string(),
+            media_dir: cfg.media.media_dir.to_string(),
             door_no: Some(1),
             duration_secs: Some(0),
         };
@@ -704,6 +705,7 @@ async fn get_stream_video(
     });
 
     // Video feeder: broadcast<Annex-B NALU> → ffmpeg stdin.
+    info!("ffmpeg running");
     let video_feeder = tokio::spawn(async move {
         loop {
             match video_rx.recv().await {

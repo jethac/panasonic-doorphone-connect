@@ -22,13 +22,15 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+use std::net::{IpAddr, SocketAddr};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncBufReadExt;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio_tungstenite::Connector;
 use tracing::{debug, error, info, warn};
 use viana_protocol::{
@@ -41,6 +43,7 @@ mod config;
 mod http;
 mod identity;
 mod media_hub;
+
 
 /// Process-wide broadcast bus for structured daemon events. Set once at
 /// startup; every `emit_event` and ring-detection println pushes here so
@@ -139,6 +142,13 @@ struct Args {
     #[arg(long, env = "VIANA_HEARTBEAT_SECS")]
     heartbeat_secs: Option<u64>,
 
+    /// Local IPv4 to put in the phone-side SDP. Auto-detected if omitted.
+    #[arg(long, env = "VIANA_LOCAL_IP")]
+    client_ip: Option<String>,
+    /// Where it audio.bin / video.bin.
+    #[arg(long, env = "VIANA_MEDIA_DIR")]
+    media_dir: Option<PathBuf>,
+
     // ----- one-shot CLI knobs (not in config) -----
     /// Send a monitor-connect kick immediately after auth. Convenient for
     /// capture jobs; the HA integration uses the HTTP API instead.
@@ -147,12 +157,6 @@ struct Args {
     /// Upper bound on duration for `--monitor-on-connect`. 0 = until stop.
     #[arg(long, default_value = "10")]
     monitor_secs: u64,
-    /// Local IPv4 to put in the phone-side SDP. Auto-detected if omitted.
-    #[arg(long, env = "VIANA_LOCAL_IP")]
-    local_ip: Option<String>,
-    /// Where `--monitor-on-connect` stores audio.bin / video.bin.
-    #[arg(long, env = "VIANA_MEDIA_DIR")]
-    media_dir: Option<PathBuf>,
     /// Which door's camera to monitor (CLI one-shot only).
     #[arg(long, default_value = "1")]
     door_no: u32,
@@ -320,7 +324,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let local_ip = match &args.local_ip {
+    let client_ip = match &args.client_ip {
         Some(ip) => ip.clone(),
         None => detect_local_ipv4().context("auto-detecting local IPv4")?,
     };
@@ -370,7 +374,7 @@ async fn main() -> Result<()> {
     // reassigned during a long outage), log loudly and continue with
     // WSS-only. The user's only recovery is then to re-pair via HA UI.
     if let Err(e) =
-        spawn_startup_sip_maintenance(&identity_loaded, &cfg, base_cfg, &local_ip).await
+        spawn_startup_sip_maintenance(&identity_loaded, &cfg, base_cfg, &client_ip).await
     {
         warn!(
             err = %e,
@@ -388,8 +392,10 @@ async fn main() -> Result<()> {
         signature_device_id,
         base_viana_id,
         heartbeat: Duration::from_secs(cfg.heartbeat.interval_secs),
-        local_ip,
+        client_ip,
         default_door_no: args.door_no,
+        ring_media_dir: "/tmp/viana-ring".to_string(),
+        answer_ring: false
     };
 
     let kick_result = run_kick_loop(&session, &panasonic_ca, cmd_rx, media_hub, cmd_tx.clone()).await;
@@ -407,7 +413,7 @@ async fn spawn_startup_sip_maintenance(
     identity_loaded: &identity::DaemonIdentity,
     cfg: &config::Config,
     base_cfg: &config::BaseConfig,
-    local_ip: &str,
+    client_ip: &str,
 ) -> anyhow::Result<()> {
     use std::net::Ipv4Addr;
     use viana_protocol::sip::{self, PairContext};
@@ -420,9 +426,9 @@ async fn spawn_startup_sip_maintenance(
         .ok_or_else(|| anyhow::anyhow!("base.lan_ip missing in config.toml"))?
         .parse()
         .context("base.lan_ip is not a valid IPv4")?;
-    let local_v4: Ipv4Addr = local_ip
+    let local_v4: Ipv4Addr = client_ip
         .parse()
-        .context("local_ip from auto-detect is not a valid IPv4")?;
+        .context("client_ip from auto-detect is not a valid IPv4")?;
     let terminal_hint = base_cfg.assigned_terminal.unwrap_or(21);
 
     let sock = std::sync::Arc::new(
@@ -474,13 +480,15 @@ struct SessionConfig {
     signature_device_id: String,
     base_viana_id: String,
     heartbeat: Duration,
-    local_ip: String,
+    client_ip: String,
     default_door_no: u32,
+    ring_media_dir: String,
+    answer_ring: bool
 }
 
 #[derive(Clone)]
 struct MonitorConfig {
-    local_ip: String,
+    client_ip: String,
     media_dir: PathBuf,
     door_no: u32,
     duration: Duration,
@@ -708,10 +716,10 @@ async fn connect_and_pump(
                 };
                 match msg {
                     Ok(Message::Text(text)) => {
-                        handle_kick_text(&text, "in", &sender_tx, &cmd_tx_self, active.is_some()).await;
+                        handle_kick_text(session, &text, "in", &sender_tx, &cmd_tx_self, active.is_some()).await;
                     }
                     Ok(Message::Binary(bin)) => match std::str::from_utf8(&bin) {
-                        Ok(text) => handle_kick_text(text, "in", &sender_tx, &cmd_tx_self, active.is_some()).await,
+                        Ok(text) => handle_kick_text(session, text, "in", &sender_tx, &cmd_tx_self, active.is_some()).await,
                         Err(_) => warn!(
                             bytes = bin.len(),
                             "non-UTF8 binary frame; raw hex={}",
@@ -757,7 +765,7 @@ async fn connect_and_pump(
                         };
                         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
                         let cfg = MonitorConfig {
-                            local_ip: session.local_ip.clone(),
+                            client_ip: session.client_ip.clone(),
                             media_dir: media_dir.clone(),
                             door_no: door,
                             duration,
@@ -917,12 +925,13 @@ fn build_monitor_connect_kick(
     seq_no: u32,
     door_no: u32,
     sdp: &str,
+    connect_kind: u32
 ) -> String {
     let json = serde_json::json!({
         "request": "connect",
         "attr": {
             "deviceInfo": { "deviceNo": door_no, "deviceName": "door" },
-            "connectKind": 2,
+            "connectKind": connect_kind,
             "isSlowSpeedVideoReception": false,
         },
         "seqNo": seq_no,
@@ -959,6 +968,88 @@ fn build_disconnect_kick(kick_id: u32, base_viana_id: &str, seq_no: u32) -> Stri
     kick::to_xml(&env).unwrap_or_default()
 }
 
+
+fn build_rtp_config(
+    media: &viana_protocol::sdp::MediaSection, 
+    label: &'static str,
+    payload_type: u8,
+    base_ip: &str,
+    base_ip_addr: IpAddr, 
+    duration: Duration,  
+) -> anyhow::Result<RtpConfig> {
+    let pairing_id = media
+        .pairing_id
+        .ok_or_else(|| anyhow::anyhow!("no {label} pairing id"))?;
+    let xor_data = media
+        .xor_data
+        .ok_or_else(|| anyhow::anyhow!("no {label} xorData"))?;
+    let auth_a = media
+        .xor_auth_a
+        .ok_or_else(|| anyhow::anyhow!("no {label} xorAuthA"))?;
+    let auth_b = media
+        .xor_auth_b
+        .ok_or_else(|| anyhow::anyhow!("no {label} xorAuthB"))?;
+
+    info!(
+        base_ip = %base_ip,
+        base_port = media.port,
+        xor = %hex::encode(xor_data),
+        pairing_id,
+        "got {label} SDP keys for monitor"
+    );
+
+    let config = RtpConfig {
+        label,
+        xor_data,
+        auth_a,
+        auth_b,
+        duration,
+        base_ip: base_ip_addr,
+        base_port: media.port,
+        payload_type,
+        pairing_id,
+    };
+
+    Ok(config)
+}
+
+fn make_rtp_configs(
+    base_sdp: &viana_protocol::sdp::Sdp ,
+    base_ip: &str,
+    base_ip_addr: IpAddr,
+    duration: Duration,
+) -> anyhow::Result<HashMap<&'static str, RtpConfig>> {
+    let base_audio = base_sdp
+        .audio()
+        .ok_or_else(|| anyhow::anyhow!("no audio media"))?;
+    let base_video = base_sdp
+        .video()
+        .ok_or_else(|| anyhow::anyhow!("no video media"))?;
+
+    let audio_config = build_rtp_config(
+        base_audio,
+        "audio",
+        8, // PCMA
+        base_ip,
+        base_ip_addr,
+        duration,
+    )?;
+
+    let video_config = build_rtp_config(
+        base_video,
+        "video",
+        97, // dynamic H.264
+        base_ip,
+        base_ip_addr,
+        duration,
+    )?;
+
+    Ok(HashMap::from([
+        ("audio", audio_config),
+        ("video", video_config),
+    ]))
+}
+
 /// Drive one monitor session end-to-end: bind UDP sockets, send the kick,
 /// wait for the base's SDP response, receive media, save artifacts, send
 /// disconnect.
@@ -971,23 +1062,23 @@ async fn run_monitor(
     media_hub: Arc<media_hub::MediaHub>,
 ) -> Result<()> {
     info!(
-        local_ip = %cfg.local_ip,
+        client_ip = %cfg.client_ip,
         media_dir = %cfg.media_dir.display(),
         door = cfg.door_no,
         duration_s = cfg.duration.as_secs(),
         "monitor session starting"
     );
 
-    // Bind UDP sockets (kernel auto-assigns ports). Bind to 0.0.0.0 so the
-    // base can send to whatever IP we advertised in SDP regardless of
+    // Bind UDP sockets (kernel auto-assigns ports). Bind to client_ip from cfg to overcome 
     // multi-NIC routing oddities.
-    let audio_sock = Arc::new(tokio::net::UdpSocket::bind("0.0.0.0:0").await.context("audio bind")?);
-    let video_sock = tokio::net::UdpSocket::bind("0.0.0.0:0").await.context("video bind")?;
+    let audio_sock = Arc::new(tokio::net::UdpSocket::bind(format!("{}:0", cfg.client_ip)).await.context("audio bind")?);
+    let video_sock = Arc::new(tokio::net::UdpSocket::bind(format!("{}:0", cfg.client_ip)).await.context("video bind")?);
     let audio_port = audio_sock.local_addr()?.port();
     let video_port = video_sock.local_addr()?.port();
-    info!(audio_port, video_port, "RTP sockets bound");
+    info!(audio_port, video_port, "monitor binding RTP sockets");
 
-    let phone_sdp = viana_protocol::sdp::build_phone_offer(&cfg.local_ip, audio_port, video_port);
+    let phone_sdp = viana_protocol::sdp::build_phone_offer(&cfg.client_ip, audio_port, video_port);
+    info!(phone_sdp,"monitor - sending sdp");
 
     let seq_no = seq_no_counter.fetch_add(1, Ordering::Relaxed) as i64;
     let kick_id = kick_id_counter.fetch_add(1, Ordering::Relaxed);
@@ -998,7 +1089,7 @@ async fn run_monitor(
         .unwrap()
         .insert(seq_no, resp_tx);
 
-    let xml = build_monitor_connect_kick(kick_id, &base_viana_id, seq_no as u32, cfg.door_no, &phone_sdp);
+    let xml = build_monitor_connect_kick(kick_id, &base_viana_id, seq_no as u32, cfg.door_no, &phone_sdp, 2);
     sender_tx.send(xml).await.map_err(|e| anyhow::anyhow!("send connect: {e}"))?;
     info!(seq_no, kick_id_hex = format!("{:08X}", kick_id), "sent connect (monitor) kick");
 
@@ -1015,7 +1106,7 @@ async fn run_monitor(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let reason = resp_json.get("reason").and_then(|v| v.as_i64()).unwrap_or(-1);
-    info!(result, reason, "base connect response");
+    info!(result, reason, "media base connect response");
 
     if !result {
         error!("base rejected monitor connect — JSON: {}", base_response.json);
@@ -1033,44 +1124,20 @@ async fn run_monitor(
         .connection_ip
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("base SDP missing c=IP"))?;
-    let base_audio = base_sdp.audio().ok_or_else(|| anyhow::anyhow!("no audio media"))?;
-    let base_video = base_sdp.video().ok_or_else(|| anyhow::anyhow!("no video media"))?;
-    let audio_xor = base_audio
-        .xor_data
-        .ok_or_else(|| anyhow::anyhow!("no audio xorData"))?;
-    let video_xor = base_video
-        .xor_data
-        .ok_or_else(|| anyhow::anyhow!("no video xorData"))?;
-    let audio_auth_a = base_audio
-        .xor_auth_a
-        .ok_or_else(|| anyhow::anyhow!("no audio xorAuthA"))?;
-    let audio_auth_b = base_audio
-        .xor_auth_b
-        .ok_or_else(|| anyhow::anyhow!("no audio xorAuthB"))?;
-    let video_auth_a = base_video
-        .xor_auth_a
-        .ok_or_else(|| anyhow::anyhow!("no video xorAuthA"))?;
-    let video_auth_b = base_video
-        .xor_auth_b
-        .ok_or_else(|| anyhow::anyhow!("no video xorAuthB"))?;
+    let base_ip_addr: std::net::IpAddr = base_ip.parse().context("parse base ip")?;
 
-    info!(
-        base_ip = %base_ip,
-        base_audio_port = base_audio.port,
-        base_video_port = base_video.port,
-        audio_xor = %hex::encode(audio_xor),
-        video_xor = %hex::encode(video_xor),
-        "got SDP keys — starting media receive"
-    );
+    // Usage:
+    let rtp_configs: HashMap<&'static str, RtpConfig> =
+        make_rtp_configs(&base_sdp, base_ip, base_ip_addr, cfg.duration)?;
 
     let audio_path = cfg.media_dir.join("audio.bin");
     let video_path = cfg.media_dir.join("video.bin");
     let audio_file = tokio::fs::File::create(&audio_path).await?;
     let video_file = tokio::fs::File::create(&video_path).await?;
 
-    let base_ip_addr: std::net::IpAddr = base_ip.parse().context("parse base ip")?;
-    let base_audio_addr = std::net::SocketAddr::new(base_ip_addr, base_audio.port);
+    let base_audio_addr = std::net::SocketAddr::new(base_ip_addr, rtp_configs["audio"].base_port);
 
+    /*
     // Register outbound audio context BEFORE spawning the mixer so
     // POST /control/answer requests that race in immediately can find
     // the socket. The mixer task pulls this Arc each tick.
@@ -1091,42 +1158,46 @@ async fn run_monitor(
     let mixer_stop = cfg.stop.clone();
     let mixer_handle = tokio::spawn(async move {
         run_outbound_mixer(mixer_hub, mixer_stop).await;
+    });*/
+
+    let (mut video_receiver, _video_state_rx) = RtpReceiver::new(
+        rtp_configs["video"].clone(),
+        video_sock.clone(),
+        video_file,
+        cfg.stop.clone(),
+        VideoConsumer::new(media_hub.video_in_tx.clone()),
+    );
+
+    let (mut audio_receiver, mut audio_state_rx) = RtpReceiver::new(
+        rtp_configs["audio"].clone(),
+        audio_sock.clone(),
+        audio_file,
+        cfg.stop.clone(),
+        AudioConsumer::new(media_hub.audio_in_tx.clone()),
+    );
+
+    let recv_audio = tokio::spawn(async move {
+        audio_receiver.run().await
     });
 
-    let recv_audio = tokio::spawn(receive_rtp_loop(
-        "audio",
-        audio_sock.clone(),
-        audio_xor,
-        audio_auth_a,
-        audio_auth_b,
-        audio_file,
-        cfg.duration,
-        base_ip_addr,
-        base_audio.port,
-        8, // PCMA
-        cfg.stop.clone(),
-        Some(media_hub.audio_in_tx.clone()),
-        None,
-    ));
-    let recv_video = tokio::spawn(receive_rtp_loop(
-        "video",
-        Arc::new(video_sock),
-        video_xor,
-        video_auth_a,
-        video_auth_b,
-        video_file,
-        cfg.duration,
-        base_ip_addr,
-        base_video.port,
-        97, // dynamic H.264
-        cfg.stop.clone(),
-        None,
-        Some(media_hub.video_in_tx.clone()),
-    ));
+
+    let recv_video = tokio::spawn(async move {
+        let _ = audio_state_rx
+            .wait_for(|state| matches!(state, StreamState::Active | StreamState::Stopped))
+            .await;
+
+        // Optional: if video stopped without ever becoming active, skip audio
+        if *audio_state_rx.borrow() == StreamState::Stopped {
+            return Ok(0);
+        }
+
+        video_receiver.run().await
+    });
+
 
     let (a, v) = tokio::join!(recv_audio, recv_video);
     // Mixer task observes cfg.stop too; just wait for it to wind down.
-    let _ = mixer_handle.await;
+    // let _ = mixer_handle.await;
     let audio_count = a.unwrap_or(Ok(0)).unwrap_or(0);
     let video_count = v.unwrap_or(Ok(0)).unwrap_or(0);
     info!(
@@ -1134,7 +1205,7 @@ async fn run_monitor(
         video_packets = video_count,
         audio_path = %audio_path.display(),
         video_path = %video_path.display(),
-        "monitor session media saved"
+        "monitor - session media saved"
     );
 
     // Send disconnect.
@@ -1142,10 +1213,74 @@ async fn run_monitor(
     let dc_kid = kick_id_counter.fetch_add(1, Ordering::Relaxed);
     let dc_xml = build_disconnect_kick(dc_kid, &base_viana_id, dc_seq);
     let _ = sender_tx.send(dc_xml).await;
-    info!("sent disconnect");
+    info!("monitor - sent disconnect");
 
     pending_monitors().lock().unwrap().remove(&seq_no);
     Ok(())
+}
+
+/// Handles decoded media payloads produced from decrypted RTP packets.
+pub trait MediaConsumer: Send {
+    fn on_payload(&mut self, payload: &[u8]);
+}
+
+/// Decodes PCMA (A-law) audio payloads and broadcasts PCM samples.
+pub struct AudioConsumer {
+    pcm_tx: broadcast::Sender<Arc<Vec<i16>>>,
+}
+
+impl AudioConsumer {
+    pub fn new(pcm_tx: broadcast::Sender<Arc<Vec<i16>>>) -> Self {
+        Self { pcm_tx }
+    }
+}
+
+impl MediaConsumer for AudioConsumer {
+    fn on_payload(&mut self, payload: &[u8]) {
+        // PCMA decode → PCM samples. One a-law byte per
+        // sample; payload should be ~160 bytes per 20ms.
+        let pcm = viana_media::pcma::decode(payload);
+        let _ = self.pcm_tx.send(Arc::new(pcm));
+    }
+}
+
+/// Depacketizes RFC 6184 H.264 payloads and broadcasts Annex-B NAL units.
+pub struct VideoConsumer {
+    h264_tx: broadcast::Sender<Arc<Vec<u8>>>,
+    depacketizer: viana_media::h264::H264Depacketizer,
+}
+
+impl VideoConsumer {
+    pub fn new(h264_tx: broadcast::Sender<Arc<Vec<u8>>>) -> Self {
+        Self {
+            h264_tx,
+            depacketizer: viana_media::h264::H264Depacketizer::new(),
+        }
+    }
+}
+
+impl MediaConsumer for VideoConsumer {
+    fn on_payload(&mut self, payload: &[u8]) {
+        // RFC 6184 depacketize: payload may be a complete NALU, a STAP-A
+        // aggregation, or one FU-A fragment. Output is zero or more
+        // Annex-B-prefixed NAL units that ffmpeg can decode directly.
+        for nalu in self.depacketizer.push(payload) {
+            let _ = self.h264_tx.send(Arc::new(nalu));
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RtpConfig {
+    pub label: &'static str,
+    pub xor_data: [u8; 8],
+    pub auth_a: [u8; 8],
+    pub auth_b: [u8; 8],
+    pub duration: Duration,
+    pub base_ip: std::net::IpAddr,
+    pub base_port: u16,
+    pub payload_type: u8,
+    pub pairing_id: u32,
 }
 
 /// Bind a UDP socket and read RTP packets for `duration`. Each packet has the
@@ -1159,121 +1294,215 @@ async fn run_monitor(
 /// base responds with the actual media:
 /// every monitor flow opens with one 12-byte phone→base RTP-header-only
 /// packet, then thousands of base→phone media packets follow.
-async fn receive_rtp_loop(
-    label: &'static str,
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamState {
+    Piercing,
+    Challenging,
+    Active,
+    Stopped,
+}
+
+pub struct RtpReceiver<C: MediaConsumer> {
+    config: RtpConfig,
     sock: Arc<tokio::net::UdpSocket>,
-    xor_data: [u8; 8],
-    auth_a: [u8; 8],
-    auth_b: [u8; 8],
-    mut out: tokio::fs::File,
-    duration: Duration,
-    base_ip: std::net::IpAddr,
-    base_port: u16,
-    payload_type: u8,
-    mut stop: tokio::sync::watch::Receiver<bool>,
-    audio_pcm_tx: Option<broadcast::Sender<Arc<Vec<i16>>>>,
-    video_h264_tx: Option<broadcast::Sender<Arc<Vec<u8>>>>,
-) -> Result<u64> {
-    // Per-loop H264 RTP depacketizer. Stays in scope across packets so
-    // FU-A fragments accumulate correctly. Audio path doesn't need it.
-    let mut h264_depack = viana_media::h264::H264Depacketizer::new();
-    use tokio::io::AsyncWriteExt;
-    let base_addr = std::net::SocketAddr::new(base_ip, base_port);
+    out: tokio::fs::File,
+    state: StreamState,
+    state_tx: tokio::sync::watch::Sender<StreamState>,
+    stop: tokio::sync::watch::Receiver<bool>,
+    consumer: C,
+    media_count: u64,
+    challenge_count: u64,
+    keepalive_count: u64,
+}
 
-    let keepalive = build_rtp_keepalive(payload_type);
+impl<C: MediaConsumer> RtpReceiver<C> {
+    pub fn new(
+        config: RtpConfig,
+        sock: Arc<tokio::net::UdpSocket>,
+        out: tokio::fs::File,
+        stop: tokio::sync::watch::Receiver<bool>,
+        consumer: C,
+    ) -> (Self, tokio::sync::watch::Receiver<StreamState>) {
+        let initial_state = StreamState::Piercing;
+        let (state_tx, state_rx) = tokio::sync::watch::channel(initial_state);
 
-    if let Err(e) = sock.send_to(&keepalive, base_addr).await {
-        warn!(label, ?e, "initial keepalive send failed");
-    }
-
-    let mut buf = vec![0u8; 4096];
-    let deadline = tokio::time::Instant::now() + duration;
-    let mut media_count: u64 = 0;
-    let mut challenge_count: u64 = 0;
-    let mut keepalive_tick = tokio::time::interval(Duration::from_millis(500));
-    keepalive_tick.tick().await;
-
-    if *stop.borrow() {
-        return Ok(0);
-    }
-
-    loop {
-        let remaining = match deadline.checked_duration_since(tokio::time::Instant::now()) {
-            Some(d) => d,
-            None => break,
+        let receiver = Self {
+            config,
+            sock,
+            out,
+            state: initial_state,
+            state_tx,
+            stop,
+            consumer,
+            media_count : 0,
+            challenge_count: 0,
+            keepalive_count: 0,
         };
-        tokio::select! {
-            _ = keepalive_tick.tick() => {
-                let _ = sock.send_to(&keepalive, base_addr).await;
-            }
-            _ = stop.changed() => {
-                if *stop.borrow() {
-                    info!(label, "stop signal received");
-                    break;
+
+        (receiver, state_rx)
+    }
+
+    fn set_state(&mut self, new_state: StreamState) {
+        if self.state != new_state {
+            self.state = new_state;
+            let _ = self.state_tx.send(new_state);
+        }
+    }
+
+    fn build_rtp_payload(payload_type: u8, ssrc: [u8; 4]) -> [u8; 12] {
+        [
+            0x41, payload_type,
+            0x00, 0x00,             // seq = 0
+            0x00, 0x00, 0x00, 0x00, // timestamp = 0
+            ssrc[0], ssrc[1], ssrc[2], ssrc[3],
+        ]
+    }
+
+    pub async fn run(&mut self) -> Result<u64> {
+        use tokio::io::AsyncWriteExt;
+
+        let mut base_addr = std::net::SocketAddr::new(self.config.base_ip, self.config.base_port);
+
+        let mut ssrc: [u8; 4] = [0x86, 0x91, 0xa7, 0x80];
+        let mut pairing_id : u32 = self.config.pairing_id;
+        ssrc = pairing_id.to_be_bytes();
+
+        let mut keepalive = Self::build_rtp_payload(self.config.payload_type, ssrc);
+        info!(
+            packet = ?format_args!("{:02x?}", keepalive),
+            label = self.config.label,
+            "made keepalive"
+        );
+
+        if let Err(e) = self.sock.send_to(&keepalive, base_addr).await {
+            warn!(label = self.config.label, ?e, "initial keepalive send failed");
+        }
+
+        let mut buf = vec![0u8; 4096];
+        let deadline = tokio::time::Instant::now() + self.config.duration;
+        let mut keepalive_tick = tokio::time::interval(Duration::from_millis(500));
+        keepalive_tick.tick().await;
+
+        if *self.stop.borrow() {
+            self.set_state(StreamState::Stopped);
+            return Ok(0);
+        }
+
+        info!(
+            payload_type = self.config.payload_type,
+            base_port = self.config.base_port,
+            "receive rtp loop"
+        );
+
+        loop {
+            let remaining = match deadline.checked_duration_since(tokio::time::Instant::now()) {
+                Some(d) => d,
+                None => break,
+            };
+
+            tokio::select! {
+                _ = keepalive_tick.tick() => {
+                    let _ = self.sock.send_to(&keepalive, base_addr).await;
+                    self.keepalive_count += 1;
+
+                    if  (self.challenge_count == 0) && (self.keepalive_count % 10 == 0) {
+                        info!(self.config.label,self.keepalive_count, "still trying ");
+                    }
+                    }
+                _ = self.stop.changed() => {
+                    if *self.stop.borrow() {
+                        info!(label = self.config.label, "stop signal received");
+                        break;
+                    }
                 }
-            }
-            recv = tokio::time::timeout(remaining, sock.recv_from(&mut buf)) => {
-                let (n, src) = match recv {
-                    Ok(Ok((n, src))) => (n, src),
-                    Ok(Err(e)) => { warn!(?e, label, "recv_from error"); break; }
-                    Err(_) => break,
-                };
-                let wire = &buf[..n];
-
-                // Challenge packets identified BEFORE XOR-decrypt because the
-                // X bit lives in byte 0 (offset < 12, untouched by the XOR).
-                if viana_media::challenge::is_challenge(wire) {
-                    let response = viana_media::challenge::build_response(wire, auth_a, auth_b);
-                    if let Err(e) = sock.send_to(&response, base_addr).await {
-                        warn!(label, ?e, "challenge response send failed");
-                    }
-                    challenge_count += 1;
-                    if challenge_count == 1 {
-                        info!(label, %src, "responded to first challenge");
-                    }
-                    continue;
-                }
-
-                // Otherwise it's a media packet — XOR-decrypt, fan out
-                // to broadcast subscribers, and save to disk.
-                let mut pkt = wire.to_vec();
-                viana_media::xor::unwrap_in_place(&mut pkt, xor_data, 12);
-                let len = (pkt.len() as u32).to_be_bytes();
-                out.write_all(&len).await?;
-                out.write_all(&pkt).await?;
-
-                // Strip RTP header (12 bytes minimum) before fanning out.
-                if let Some(payload_off) = viana_media::rtp::payload_offset(&pkt) {
-                    let payload = &pkt[payload_off..];
-                    if let Some(tx) = &audio_pcm_tx {
-                        // PCMA decode → PCM samples. One a-law byte per
-                        // sample; payload should be ~160 bytes per 20ms.
-                        let pcm = viana_media::pcma::decode(payload);
-                        let _ = tx.send(Arc::new(pcm));
-                    }
-                    if let Some(tx) = &video_h264_tx {
-                        // RFC 6184 depacketize: payload may be a
-                        // complete NALU, a STAP-A aggregation, or one
-                        // FU-A fragment. Output is zero or more
-                        // Annex-B-prefixed NAL units that ffmpeg can
-                        // decode directly.
-                        for nalu in h264_depack.push(payload) {
-                            let _ = tx.send(Arc::new(nalu));
+                recv = tokio::time::timeout(remaining, self.sock.recv_from(&mut buf)) => {
+                    let (n, src) = match recv {
+                        Ok(Ok((n, src))) => (n, src),
+                        Ok(Err(e)) => {
+                            warn!(?e, label = self.config.label, "recv_from error");
+                            break;
                         }
-                    }
-                }
+                        Err(_) => break,
+                    };
+                    let wire = &buf[..n];
 
-                media_count += 1;
-                if media_count == 1 {
-                    info!(label, %src, n, "first MEDIA packet");
+                    // Challenge packets identified BEFORE XOR-decrypt because the
+                    // X bit lives in byte 0 (offset < 12, untouched by the XOR).
+                    if viana_media::challenge::is_challenge(wire) {
+                        self.handle_challenge(wire, base_addr, src).await;
+                        continue;
+                    }
+
+                    self.handle_media(wire, src).await?;
                 }
             }
         }
+
+        self.set_state(StreamState::Stopped);
+        self.out.flush().await?;
+        info!(
+            label = self.config.label,
+            self.challenge_count,
+            self.media_count,
+            "rtp loop done"
+        );
+        Ok(self.media_count)
     }
-    out.flush().await?;
-    info!(label, challenge_count, media_count, "rtp loop done");
-    Ok(media_count)
+
+    async fn handle_challenge(
+        &mut self,
+        wire: &[u8],
+        base_addr: std::net::SocketAddr,
+        src: std::net::SocketAddr,
+    ) {
+        self.set_state(StreamState::Challenging);
+        let response = viana_media::challenge::build_response(
+            wire,
+            self.config.auth_a,
+            self.config.auth_b,
+        );
+        if let Err(e) = self.sock.send_to(&response, base_addr).await {
+            warn!(label = self.config.label, ?e, "challenge response send failed");
+        }
+        self.challenge_count += 1;
+        self.set_state(StreamState::Active);
+        if self.challenge_count == 1 {
+            info!(label = self.config.label, %src, self.keepalive_count, "responded to first challenge");
+        }
+    }
+
+    async fn handle_media(
+        &mut self,
+        wire: &[u8],
+        src: std::net::SocketAddr,
+    ) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let mut pkt = wire.to_vec();
+        viana_media::xor::unwrap_in_place(&mut pkt, self.config.xor_data, 12);
+        let len = (pkt.len() as u32).to_be_bytes();
+        self.out.write_all(&len).await?;
+        self.out.write_all(&pkt).await?;
+
+        if let Some(payload_off) = viana_media::rtp::payload_offset(&pkt) {
+            self.consumer.on_payload(&pkt[payload_off..]);
+        }
+
+        self.media_count += 1;
+        if self.media_count == 1 {
+            info!(
+                label = self.config.label,
+                %src,
+                n = wire.len(),
+                "first MEDIA packet"
+            );
+        }
+        Ok(())
+    }
 }
+
 
 /// 20 ms outbound RTP mixer. Runs while monitor session is alive.
 /// Each tick: pull SAMPLES_PER_FRAME samples from each active talker's
@@ -1389,19 +1618,7 @@ async fn run_outbound_mixer(
     info!("outbound mixer stopped");
 }
 
-/// 12-byte RTP-header-only keepalive that the legitimate Galaxy sends to
-/// "punch" the path on the base's media port. Matches bytes from
-/// Observed keepalives look like: `41 PT 00 00 00 00
-/// 00 00 86 91 a7 80`. The fixed SSRC `8691a780` is what the legit app uses;
-/// the base appears to ignore SSRC mismatches.
-fn build_rtp_keepalive(payload_type: u8) -> [u8; 12] {
-    [
-        0x41, payload_type,
-        0x00, 0x00,             // seq = 0
-        0x00, 0x00, 0x00, 0x00, // timestamp = 0
-        0x86, 0x91, 0xa7, 0x80, // SSRC
-    ]
-}
+
 
 #[derive(Debug)]
 struct RingState {
@@ -1453,6 +1670,7 @@ fn detect_ring(json: &str) -> Option<RingState> {
 }
 
 async fn handle_kick_text(
+    session: &SessionConfig,
     text: &str,
     direction: &str,
     sender_tx: &tokio::sync::mpsc::Sender<String>,
@@ -1498,20 +1716,23 @@ async fn handle_kick_text(
                 "smartp_no": ring.smartp_no,
             }));
 
-            // Auto-fire monitor session on ring start (preview mode).
-            // INTERCOM-DESIGN.md §C: ring → preview without user
-            // action. If monitor already active, no-op (the ring
-            // overlaps with someone manually viewing — fine).
-            if ring.active && !monitor_already_active {
-                let cmd = DaemonCommand::StartMonitor {
-                    media_dir: "/tmp/viana-ring".to_string(),
-                    door_no: ring.device_no.map(|n| n as u32),
-                    duration_secs: Some(0), // 0 = until stop / idle teardown
-                };
-                if let Err(e) = cmd_tx_self.try_send(cmd) {
-                    warn!("auto-monitor StartMonitor send failed: {e}");
-                } else {
-                    info!("ring detected → auto-fired monitor session");
+            if session.answer_ring == true
+            {
+                // Auto-fire monitor session on ring start (preview mode).
+                // INTERCOM-DESIGN.md §C: ring → preview without user
+                // action. If monitor already active, no-op (the ring
+                // overlaps with someone manually viewing — fine).
+                if ring.active && !monitor_already_active {
+                    let cmd = DaemonCommand::StartMonitor {
+                        media_dir: session.ring_media_dir.clone(),
+                        door_no: ring.device_no.map(|n| n as u32),
+                        duration_secs: Some(0), // 0 = until stop / idle teardown
+                    };
+                    if let Err(e) = cmd_tx_self.try_send(cmd) {
+                        warn!("auto-monitor StartMonitor send failed: {e}");
+                    } else {
+                        info!("ring detected → auto-fired monitor session");
+                    }
                 }
             }
         }

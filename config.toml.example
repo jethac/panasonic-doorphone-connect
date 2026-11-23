@@ -6,6 +6,11 @@ kiki_path = "/opt/viana-ha/identity/kiki.dat"
 ca_cert_path = "/opt/viana-ha/identity/ca.pem"
 # unique_id = "00000002199023255552"
 
+# use this section to force the RTP client
+#[media]
+#client_ip="10.50.0.6"
+#save_dir="/tmp/viana-media"
+
 [server]
 listen = "127.0.0.1:7878"
 # auth_token is generated on first boot if omitted.
@@ -18,3 +23,5 @@ interval_secs = 10
 # [base]
 # viana_id = "0000000000000000"
 # lan_ip = "192.0.2.1"
+# mac = "aa:bb:cc:dd:ee:ff"
+

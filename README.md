@@ -148,7 +148,7 @@ sudo systemctl enable --now viana-ha
 
 Automation snippets live in [`ha-integration/custom_components/panasonic_doorphone_connect/AUTOMATIONS.md`](ha-integration/custom_components/panasonic_doorphone_connect/AUTOMATIONS.md).
 
-## ミニト　不具合 / Minting is Presently Broken
+## ミニト（新規登録）　不具合 / Minting (Adding a New Device) is Presently Broken
 現時点、本プログラムのKikiIdは作成できない状態ので、他の手段でKikiIdを作成する必要です。
 (1) ルートになっている機器から、アンドロイドの携帯アプリを起動。
 (2) そこからkiki.datおよびdisp_idを奪う。kiki.datは`/data/data/com.panasonic.psn.android.doorphoneconnect`においている。disp_idはログの「W VIANA   : jni/interface/p2papl_kikiId.c:246 (P2PAPL_GetKikiId) dispID=1111222233334444」のようなラインから取れる。
@@ -172,9 +172,9 @@ VIANA の身分発行には、公式アプリのネイティブライブラリ�
 
 Minting a VIANA identity uses an ecosystem secret that shipped in the official app's native library. If Panasonic rotates it, leftover official clients and this bridge break together.
 
-`kiki.dat` と `config.toml` は端末秘密です。リポジトリに入れないでください。
+`kiki.dat`、`kiki.disp_id` と `config.toml` は端末秘密です。リポジトリに入れないでください。
 
-`kiki.dat` and `config.toml` are device secrets. Do not commit them.
+`kiki.dat`, `kiki.disp_id`, and `config.toml` are device secrets. Do not commit them.
 
 ## ライセンス / License
 
