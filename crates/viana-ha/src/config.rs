@@ -23,6 +23,8 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
+    #[serde(default)]
+    pub media: MediaConfig
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -83,6 +85,23 @@ pub struct BaseConfig {
     /// stashed for future direct-to-base operations.
     #[serde(default)]
     pub cert: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MediaConfig {
+    #[serde(default)]
+    pub client_ip : Option<String>,
+    #[serde(default)]
+    pub media_dir :String
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self {
+            client_ip: Some("127.0.0.1".to_string()),
+            media_dir: "/tmp/viana-stream".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

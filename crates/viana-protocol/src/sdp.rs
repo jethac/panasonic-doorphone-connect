@@ -11,6 +11,7 @@
 //! Everything else is round-tripped or generated from a fixed template.
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use tracing::{debug, info, warn};
 
 use crate::error::{Error, Result};
 
@@ -60,6 +61,7 @@ impl Sdp {
 /// `\r\n` and bare-`\n` line terminators we've seen in real captures, and
 /// silently skips lines we don't recognise.
 pub fn parse(text: &str) -> Result<Sdp> {
+    info!(text, "media - SDP blob");
     let mut connection_ip: Option<String> = None;
     let mut media: Vec<MediaSection> = Vec::new();
     let mut cur: Option<MediaSection> = None;
@@ -160,8 +162,8 @@ pub fn build_phone_offer(local_ip: &str, audio_port: u16, video_port: u16) -> St
     // The app uses LF-only line endings inside CDATA. Real captures show this.
     format!(
         "v=0\r\n\
-         o=mobile 0 0 IN IP4 {ip}\r\n\
-         s=\r\n\
+         o={uname} 0 0 IN IP4 {ip}\r\n\
+         s=-\r\n\
          c=IN IP4 {ip}\r\n\
          t=0 0\r\n\
          m=video {vport} RTP/AVP 97\r\n\
@@ -172,10 +174,11 @@ pub fn build_phone_offer(local_ip: &str, audio_port: u16, video_port: u16) -> St
          a=rtpmap:8 PCMA/8000\r\n\
          a=ptime:20\r\n\
          a=sendrecv\r\n",
+        uname = "doorPhone",
         ip = local_ip,
         vport = video_port,
         aport = audio_port,
-    )
+    ).replace("\r\n","\n")
 }
 
 #[cfg(test)]
